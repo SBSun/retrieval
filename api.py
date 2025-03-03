@@ -1,40 +1,52 @@
 import os
 import openai
 from dotenv import load_dotenv
+from fastapi.params import Query, Body
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import PromptTemplate
 from langchain_openai import ChatOpenAI
-from openai import models
-from pydantic import BaseModel
 from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from starlette.responses import StreamingResponse
+
 from embedding_faiss import load_documents_from_files
 
 load_dotenv(verbose=True)
-openai.api_key = os.getenv('OPENAI_API_KEY')
-model = ChatOpenAI(model="gpt-3.5-turbo")
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
 app = FastAPI()
 
+llm = ChatOpenAI(
+    temperature=0,
+    model_name="gpt-4o-mini"
+)
+
+template = "아래 질문에 대한 답변을 해주세요. \n{query}"
+prompt_template = PromptTemplate(input_variables=["query"], template=template)
+chain = prompt_template | llm | StrOutputParser()
+
 class ChatRequest(BaseModel):
-    question: str
+    query: str
 
-class ChatResponse(BaseModel):
-    answer: str
-
-@app.get("/chat", response_model=ChatResponse)
-async def chat():
+@app.post("/chat")
+async def chat(request: ChatRequest):
     try:
-        # GPT-3.5-turbo 모델 호출
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "user", "content": "hello"}
-            ]
-        )
-        # 모델의 응답 추출
-        reply = response['choices'][0]['message']['content']
-        return ChatResponse(answer=reply)
+        response = await chain.ainvoke({"query": request.query})
+        return response
     except Exception as e:
-        # 에러 처리
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+        return str(e)
+
+@app.post("/chat/stream")
+async def chat_stream(request: ChatRequest):
+    def event_stream():
+        try:
+            for chunk in chain.stream({"query": request.query}):
+                if len(chunk) > 0:
+                    yield f"data: {chunk}\n\n"
+        except Exception as e:
+            yield f"data: {str(e)}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 @app.post("/document/question")
 async def question():
